@@ -1,126 +1,100 @@
-const {
-  time,
-  loadFixture,
-} = require("@nomicfoundation/hardhat-toolbox/network-helpers");
-const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
-const { expect } = require("chai");
+ const { expect } = require("chai");
+const { ethers } = require("hardhat");
 
-describe("Lock", function () {
-  // We define a fixture to reuse the same setup in every test.
-  // We use loadFixture to run this setup once, snapshot that state,
-  // and reset Hardhat Network to that snapshot in every test.
-  async function deployOneYearLockFixture() {
-    const ONE_YEAR_IN_SECS = 365 * 24 * 60 * 60;
-    const ONE_GWEI = 1_000_000_000;
-
-    const lockedAmount = ONE_GWEI;
-    const unlockTime = (await time.latest()) + ONE_YEAR_IN_SECS;
-
-    // Contracts are deployed using the first signer/account by default
-    const [owner, otherAccount] = await ethers.getSigners();
-
-    const Lock = await ethers.getContractFactory("Lock");
-    const lock = await Lock.deploy(unlockTime, { value: lockedAmount });
-
-    return { lock, unlockTime, lockedAmount, owner, otherAccount };
-  }
-
-  describe("Deployment", function () {
-    it("Should set the right unlockTime", async function () {
-      const { lock, unlockTime } = await loadFixture(deployOneYearLockFixture);
-
-      expect(await lock.unlockTime()).to.equal(unlockTime);
-    });
-
-    it("Should set the right owner", async function () {
-      const { lock, owner } = await loadFixture(deployOneYearLockFixture);
-
-      expect(await lock.owner()).to.equal(owner.address);
-    });
-
-    it("Should receive and store the funds to lock", async function () {
-      const { lock, lockedAmount } = await loadFixture(
-        deployOneYearLockFixture
-      );
-
-      expect(await ethers.provider.getBalance(lock.target)).to.equal(
-        lockedAmount
-      );
-    });
-
-    it("Should fail if the unlockTime is not in the future", async function () {
-      // We don't use the fixture here because we want a different deployment
-      const latestTime = await time.latest();
-      const Lock = await ethers.getContractFactory("Lock");
-      await expect(Lock.deploy(latestTime, { value: 1 })).to.be.revertedWith(
-        "Unlock time should be in the future"
-      );
-    });
+describe("FlightTicket", function () {
+  let flightTicket;
+  let owner;
+  let passenger;
+  let price;
+  beforeEach(async () => {
+    [owner, passenger] = await ethers.getSigners();
+    const contractName = "FlightTicket";
+    const totalSeats = 100;
+    const price = ethers.parseEther("1");
+    flightTicket = await ethers.deployContract(contractName, [
+      totalSeats,
+      price,
+    ]);
+    await flightTicket.waitForDeployment();
   });
 
-  describe("Withdrawals", function () {
-    describe("Validations", function () {
-      it("Should revert with the right error if called too soon", async function () {
-        const { lock } = await loadFixture(deployOneYearLockFixture);
+  it("Should deploy the contract correctly", async () => {
+    totalSeats = 100;
+    expect(await flightTicket.totalSeats()).to.equal(100);
+    expect(await flightTicket.price()).to.equal(ethers.parseEther("1"));
+    expect(await flightTicket.Airline()).to.equal(owner.address);
+  });
 
-        await expect(lock.withdraw()).to.be.revertedWith(
-          "You can't withdraw yet"
-        );
-      });
+  it("should book a seat successfully", async () => {
+    const seatNumber = 1;
+    await flightTicket
+      .connect(passenger)
+      .BookYourSeat(seatNumber, { value: ethers.parseEther("1") });
+    // get the seat information
+    const seatInfo = await flightTicket.seats(seatNumber);
 
-      it("Should revert with the right error if called from another account", async function () {
-        const { lock, unlockTime, otherAccount } = await loadFixture(
-          deployOneYearLockFixture
-        );
+    expect(seatInfo.passenger).to.equal(passenger.address);
+    expect(seatInfo.isBooked).to.equal(true);
+  });
 
-        // We can increase the time in Hardhat Network
-        await time.increaseTo(unlockTime);
+  it("should not allow booking an already booked seat", async () => {
+    seatNumber = 1;
+    await flightTicket
+      .connect(passenger)
+      .BookYourSeat(seatNumber, { value: ethers.parseEther("1") });
+    await expect(
+      flightTicket
+        .connect(passenger)
+        .BookYourSeat(seatNumber, { value: ethers.parseEther("1") })
+    ).to.be.revertedWith("seat unavailable");
+  });
 
-        // We use lock.connect() to send a transaction from another account
-        await expect(lock.connect(otherAccount).withdraw()).to.be.revertedWith(
-          "You aren't the owner"
-        );
-      });
+  it("should not allow booking with an invalid seat number", async () => {
+    await expect(
+      flightTicket
+        .connect(passenger)
+        .BookYourSeat(0, { value: ethers.parseEther("1") })
+    ).to.be.revertedWith("invalid seat number");
+    await expect(
+      flightTicket
+        .connect(passenger)
+        .BookYourSeat(101, { value: ethers.parseEther("1") })
+    ).to.be.revertedWith("invalid seat number");
+  });
 
-      it("Shouldn't fail if the unlockTime has arrived and the owner calls it", async function () {
-        const { lock, unlockTime } = await loadFixture(
-          deployOneYearLockFixture
-        );
+  it("should not allow booking without enough payment", async () => {
+    const seatNumber = 1;
+    await expect(
+      flightTicket
+        .connect(passenger)
+        .BookYourSeat(seatNumber, { value: ethers.parseEther("0.5") })
+    ).to.be.revertedWith("enter valid amount");
+  });
 
-        // Transactions are sent using the first signer by default
-        await time.increaseTo(unlockTime);
+  it("should check status correctly by Airline", async () => {
+    const seatNumber = 1;
+    await flightTicket
+      .connect(passenger)
+      .BookYourSeat(seatNumber, { value: ethers.parseEther("1") });
+    expect(await flightTicket.connect(owner).checkStatus(seatNumber)).to.be
+      .true;
+  });
 
-        await expect(lock.withdraw()).not.to.be.reverted;
-      });
-    });
+  it("Should cancel a seat successfully by the airline", async function () {
+    const seatNumber = 1;
+    await flightTicket
+      .connect(passenger)
+      .BookYourSeat(seatNumber, { value: ethers.parseEther("1") });
+    await flightTicket.connect(owner).cancelSeat(seatNumber);
+    // fetch the seat information after cancellaton
+    const seatInfo = await flightTicket.seats(seatNumber);
 
-    describe("Events", function () {
-      it("Should emit an event on withdrawals", async function () {
-        const { lock, unlockTime, lockedAmount } = await loadFixture(
-          deployOneYearLockFixture
-        );
-
-        await time.increaseTo(unlockTime);
-
-        await expect(lock.withdraw())
-          .to.emit(lock, "Withdrawal")
-          .withArgs(lockedAmount, anyValue); // We accept any value as `when` arg
-      });
-    });
-
-    describe("Transfers", function () {
-      it("Should transfer the funds to the owner", async function () {
-        const { lock, unlockTime, lockedAmount, owner } = await loadFixture(
-          deployOneYearLockFixture
-        );
-
-        await time.increaseTo(unlockTime);
-
-        await expect(lock.withdraw()).to.changeEtherBalances(
-          [owner, lock],
-          [lockedAmount, -lockedAmount]
-        );
-      });
-    });
+    expect(seatInfo.passenger).to.equal(
+      "0x0000000000000000000000000000000000000000"
+    );
+    expect(seatInfo.isBooked).to.equal(false);
   });
 });
+
+    
+    
